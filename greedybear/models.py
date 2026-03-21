@@ -1,7 +1,14 @@
 # This file is a part of GreedyBear https://github.com/honeynet/GreedyBear
 # See the file 'LICENSE' for copying permission.
+import hashlib
+import hmac
+import secrets
+import uuid
+
+from django.conf import settings
 from django.contrib.postgres import fields as pg_fields
 from django.db import models
+from django.db.models import Q
 from django.db.models.functions import Lower, Now
 
 
@@ -203,6 +210,76 @@ class Tag(models.Model):
 
     def __str__(self):
         return f"{self.ioc.name} - {self.key}: {self.value} ({self.source})"
+
+
+class EventSource(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    owner = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="event_sources",
+    )
+    name = models.CharField(max_length=64)
+    token_hash = models.CharField(max_length=64, unique=True, db_index=True)
+    is_active = models.BooleanField(default=True)
+    rate_limit = models.PositiveIntegerField(default=100)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    @staticmethod
+    def generate_token() -> str:
+        return secrets.token_urlsafe(32)
+
+    @classmethod
+    def hash_token(cls, raw_token: str) -> str:
+        return hmac.new(
+            settings.SECRET_KEY.encode(),
+            raw_token.encode(),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def issue_token(self) -> str:
+        raw_token = self.generate_token()
+        self.token_hash = self.hash_token(raw_token)
+        return raw_token
+
+    def check_token(self, raw_token: str) -> bool:
+        return hmac.compare_digest(self.token_hash, self.hash_token(raw_token))
+
+    def __str__(self):
+        return f"{self.name} ({self.owner})"
+
+
+class InjectedEvent(models.Model):
+    class Status(models.TextChoices):
+        QUEUED = "queued"
+        PROCESSED = "processed"
+        FAILED = "failed"
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    source = models.ForeignKey(
+        EventSource,
+        on_delete=models.CASCADE,
+        related_name="injected_events",
+    )
+    received_at = models.DateTimeField(auto_now_add=True)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.QUEUED)
+    error_text = models.TextField(blank=True, default="")
+    observable_value = models.CharField(max_length=256)
+    observable_type = models.CharField(max_length=32, choices=IocType.choices)
+    payload_json = models.JSONField(default=dict)
+    external_event_id = models.CharField(max_length=128, null=True, blank=True, db_index=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source", "external_event_id"],
+                condition=Q(external_event_id__isnull=False),
+                name="unique_injected_event_external_id_per_source",
+            )
+        ]
+
+    def __str__(self):
+        return f"{self.observable_value} [{self.status}]"
 
 
 class ShareToken(models.Model):

@@ -17,6 +17,7 @@ from api.views import (
     feeds_share,
     general_honeypot_list,
     health_view,
+    inject_event,
     news_view,
 )
 
@@ -37,6 +38,7 @@ urlpatterns = [
     path("cowrie_session", cowrie_session_view),
     path("command_sequence", command_sequence_view),
     path("general_honeypot", general_honeypot_list),
+    path("events/inject/", inject_event),
     path("news/", news_view),
     path("health/", health_view),
     # router viewsets

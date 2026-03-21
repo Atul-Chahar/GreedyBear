@@ -1,15 +1,105 @@
+import json
 import logging
 import re
+from datetime import timedelta
+from ipaddress import ip_address
 from functools import cache
 
 from django.core.exceptions import FieldDoesNotExist
+from django.utils import timezone
 from rest_framework import serializers
 
-from greedybear.consts import REGEX_DOMAIN
+from greedybear.consts import PAYLOAD_REQUEST, REGEX_DOMAIN, SCANNER
 from greedybear.models import IOC, GeneralHoneypot, Tag
 from greedybear.utils import is_ip_address
 
 logger = logging.getLogger(__name__)
+
+
+class ObservableSerializer(serializers.Serializer):
+    value = serializers.CharField(max_length=256)
+    type = serializers.ChoiceField(choices=["ip", "domain"])
+
+    def validate(self, data):
+        value = data["value"].strip()
+        data["value"] = value
+
+        if data["type"] == "ip":
+            if not is_ip_address(value):
+                raise serializers.ValidationError({"value": "Enter a valid IP address."})
+
+            extracted_ip = ip_address(value)
+            if (
+                extracted_ip.is_loopback
+                or extracted_ip.is_private
+                or extracted_ip.is_multicast
+                or extracted_ip.is_link_local
+                or extracted_ip.is_reserved
+            ):
+                raise serializers.ValidationError({"value": "Only global IP addresses are accepted."})
+        else:
+            is_domain = bool(re.match(REGEX_DOMAIN, value)) and any(char.isalpha() for char in value)
+            if not is_domain:
+                raise serializers.ValidationError({"value": "Enter a valid domain."})
+
+        return data
+
+
+class EventDataSerializer(serializers.Serializer):
+    observable = ObservableSerializer()
+    attack_type = serializers.ChoiceField(choices=[SCANNER, PAYLOAD_REQUEST])
+    honeypot = serializers.CharField(max_length=GeneralHoneypot._meta.get_field("name").max_length)
+    sensor = serializers.IPAddressField(required=False, allow_null=True)
+    event_time = serializers.DateTimeField(required=False)
+    destination_ports = serializers.ListField(
+        child=serializers.IntegerField(min_value=1, max_value=65535),
+        required=False,
+        default=list,
+    )
+    interaction_count = serializers.IntegerField(min_value=1, required=False, default=1)
+    login_attempts = serializers.IntegerField(min_value=0, required=False, default=0)
+    related_urls = serializers.ListField(
+        child=serializers.URLField(max_length=900),
+        required=False,
+        default=list,
+    )
+    external_event_id = serializers.CharField(max_length=128, required=False, allow_blank=True)
+    raw_event = serializers.JSONField(required=False)
+
+    def validate_honeypot(self, value):
+        value = value.strip()
+        if not value:
+            raise serializers.ValidationError("This field may not be blank.")
+        return value
+
+    def validate_related_urls(self, value):
+        if len(value) > 20:
+            raise serializers.ValidationError("At most 20 related URLs are allowed.")
+        return value
+
+    def validate_raw_event(self, value):
+        if len(json.dumps(value)) > 10 * 1024:
+            raise serializers.ValidationError("raw_event must be 10KB or smaller.")
+        return value
+
+    def validate(self, data):
+        event_time = data.get("event_time")
+        if event_time is None:
+            data["event_time"] = timezone.now()
+        else:
+            now = timezone.now()
+            if event_time < now - timedelta(days=30):
+                raise serializers.ValidationError({"event_time": "Timestamps older than 30 days are not allowed."})
+            if event_time > now:
+                raise serializers.ValidationError({"event_time": "Future timestamps are not allowed."})
+
+        external_event_id = data.get("external_event_id", "").strip()
+        if external_event_id:
+            data["external_event_id"] = external_event_id
+        else:
+            data.pop("external_event_id", None)
+
+        return data
 
 
 class GeneralHoneypotSerializer(serializers.ModelSerializer):

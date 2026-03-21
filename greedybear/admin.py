@@ -10,8 +10,10 @@ from greedybear.models import (
     IOC,
     CommandSequence,
     CowrieSession,
+    EventSource,
     FireHolList,
     GeneralHoneypot,
+    InjectedEvent,
     MassScanner,
     Sensor,
     Statistics,
@@ -194,3 +196,57 @@ class GeneralHoneypotAdmin(admin.ModelAdmin):
             % number_updated,
             messages.SUCCESS,
         )
+
+
+@admin.register(EventSource)
+class EventSourceAdmin(admin.ModelAdmin):
+    list_display = ["name", "owner", "is_active", "rate_limit", "created_at"]
+    list_filter = ["is_active"]
+    search_fields = ["name", "owner__username", "owner__email"]
+    readonly_fields = ["created_at", "token_hash"]
+    actions = ["rotate_token"]
+
+    @admin.action(description="Rotate token for selected source")
+    def rotate_token(self, request, queryset):
+        if queryset.count() != 1:
+            self.message_user(request, "Select exactly one event source to rotate its token.", messages.ERROR)
+            return
+
+        source = queryset.get()
+        raw_token = source.issue_token()
+        source.save(update_fields=["token_hash"])
+        self.message_user(
+            request,
+            f"New token for {source.name}: {raw_token}",
+            messages.WARNING,
+        )
+
+    def save_model(self, request, obj, form, change):
+        raw_token = None
+        if not obj.token_hash:
+            raw_token = obj.issue_token()
+        super().save_model(request, obj, form, change)
+        if raw_token:
+            self.message_user(
+                request,
+                f"Token for {obj.name}: {raw_token}",
+                messages.WARNING,
+            )
+
+
+@admin.register(InjectedEvent)
+class InjectedEventAdmin(admin.ModelAdmin):
+    list_display = ["id", "source", "observable_value", "observable_type", "status", "received_at"]
+    list_filter = ["status", "observable_type", "source"]
+    search_fields = ["observable_value", "external_event_id", "source__name"]
+    readonly_fields = [
+        "id",
+        "source",
+        "received_at",
+        "status",
+        "error_text",
+        "observable_value",
+        "observable_type",
+        "payload_json",
+        "external_event_id",
+    ]

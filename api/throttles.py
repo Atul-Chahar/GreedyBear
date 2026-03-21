@@ -45,3 +45,27 @@ class SharedFeedRateThrottle(SimpleRateThrottle):
 
     def get_cache_key(self, request, view):
         return self.cache_format % {"scope": self.scope, "ident": self.get_ident(request)}
+
+
+class EventSourceThrottle(SimpleRateThrottle):
+    scope = "event_source"
+
+    def get_rate(self):
+        return "100/minute"
+
+    def allow_request(self, request, view):
+        source = getattr(request, "auth", None)
+        if source is None:
+            return True
+
+        self.rate = f"{source.rate_limit}/minute"
+        self.num_requests, self.duration = self.parse_rate(self.rate)
+        return super().allow_request(request, view)
+
+    def get_cache_key(self, request, view):
+        source = getattr(request, "auth", None)
+        ident = str(source.pk) if source is not None else self.get_ident(request)
+        return self.cache_format % {
+            "scope": self.scope,
+            "ident": ident,
+        }

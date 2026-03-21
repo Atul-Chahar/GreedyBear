@@ -1,6 +1,8 @@
 from datetime import datetime
 from unittest.mock import patch
 
+from greedybear.models import EventSource, IOC, InjectedEvent, IocType
+
 from . import CustomTestCase
 
 
@@ -152,3 +154,117 @@ class TestOtherTasks(CustomTestCase):
 
         enrich_abuseipdb()
         mock_execute.assert_called_once()
+
+
+class TestProcessInjectedEvent(CustomTestCase):
+    def setUp(self):
+        super().setUp()
+        self.source = EventSource(owner=self.superuser, name="inject-worker")
+        self.source.issue_token()
+        self.source.save()
+
+    @patch("greedybear.cronjobs.scoring.scoring_jobs.UpdateScores.score_only")
+    def test_process_injected_event_creates_ioc(self, mock_score_only):
+        event = InjectedEvent.objects.create(
+            source=self.source,
+            observable_value="9.9.9.9",
+            observable_type=IocType.IP.value,
+            payload_json={
+                "observable": {"value": "9.9.9.9", "type": "ip"},
+                "attack_type": "scanner",
+                "honeypot": "DemoPot",
+                "sensor": "2.2.2.2",
+                "event_time": "2026-03-21T10:15:00",
+                "destination_ports": [22],
+                "interaction_count": 1,
+                "login_attempts": 1,
+                "related_urls": ["https://example.com/dropper"],
+            },
+        )
+
+        from greedybear.tasks import process_injected_event
+
+        process_injected_event(str(event.pk))
+
+        event.refresh_from_db()
+        ioc = IOC.objects.get(name="9.9.9.9")
+        self.assertEqual(event.status, InjectedEvent.Status.PROCESSED)
+        self.assertEqual(ioc.first_seen, datetime(2026, 3, 21, 10, 15, 0))
+        self.assertEqual(ioc.last_seen, datetime(2026, 3, 21, 10, 15, 0))
+        self.assertEqual(ioc.interaction_count, 1)
+        self.assertEqual(ioc.login_attempts, 1)
+        self.assertIn("DemoPot", list(ioc.general_honeypot.values_list("name", flat=True)))
+        self.assertIn("2.2.2.2", list(ioc.sensors.values_list("address", flat=True)))
+        mock_score_only.assert_called_once()
+
+    @patch("greedybear.cronjobs.scoring.scoring_jobs.UpdateScores.score_only")
+    def test_process_injected_event_merges_existing_ioc(self, mock_score_only):
+        existing_ioc = IOC.objects.create(
+            name="9.9.9.9",
+            type=IocType.IP.value,
+            first_seen=datetime(2026, 3, 20, 10, 0, 0),
+            last_seen=datetime(2026, 3, 20, 10, 0, 0),
+            days_seen=[datetime(2026, 3, 20, 10, 0, 0).date()],
+            number_of_days_seen=1,
+            attack_count=1,
+            interaction_count=2,
+            scanner=True,
+            destination_ports=[22],
+            login_attempts=1,
+            related_urls=["https://example.com/a"],
+        )
+        existing_ioc.general_honeypot.add(self.cowrie_hp)
+
+        event = InjectedEvent.objects.create(
+            source=self.source,
+            observable_value="9.9.9.9",
+            observable_type=IocType.IP.value,
+            payload_json={
+                "observable": {"value": "9.9.9.9", "type": "ip"},
+                "attack_type": "scanner",
+                "honeypot": "Cowrie",
+                "sensor": "3.3.3.3",
+                "event_time": "2026-03-21T11:00:00",
+                "destination_ports": [443],
+                "interaction_count": 3,
+                "login_attempts": 2,
+                "related_urls": ["https://example.com/b"],
+            },
+        )
+
+        from greedybear.tasks import process_injected_event
+
+        process_injected_event(str(event.pk))
+
+        event.refresh_from_db()
+        existing_ioc.refresh_from_db()
+        self.assertEqual(event.status, InjectedEvent.Status.PROCESSED)
+        self.assertEqual(existing_ioc.attack_count, 2)
+        self.assertEqual(existing_ioc.interaction_count, 5)
+        self.assertEqual(existing_ioc.login_attempts, 3)
+        self.assertEqual(existing_ioc.last_seen, datetime(2026, 3, 21, 11, 0, 0))
+        self.assertEqual(existing_ioc.destination_ports, [22, 443])
+        self.assertEqual(existing_ioc.related_urls, ["https://example.com/a", "https://example.com/b"])
+        self.assertIn("3.3.3.3", list(existing_ioc.sensors.values_list("address", flat=True)))
+        mock_score_only.assert_called_once()
+
+    def test_process_injected_event_marks_failure(self):
+        event = InjectedEvent.objects.create(
+            source=self.source,
+            observable_value="9.9.9.9",
+            observable_type=IocType.IP.value,
+            payload_json={
+                "observable": {"value": "9.9.9.9", "type": "ip"},
+                "attack_type": "scanner",
+                "honeypot": "Ddospot",
+                "event_time": "2026-03-21T11:00:00",
+            },
+        )
+
+        from greedybear.tasks import process_injected_event
+
+        process_injected_event(str(event.pk))
+
+        event.refresh_from_db()
+        self.assertEqual(event.status, InjectedEvent.Status.FAILED)
+        self.assertIn("disabled", event.error_text.lower())

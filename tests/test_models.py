@@ -1,4 +1,4 @@
-from greedybear.models import IocType, Statistics, Tag, ViewType
+from greedybear.models import EventSource, InjectedEvent, IocType, Statistics, Tag, ViewType
 
 from . import CustomTestCase
 
@@ -88,3 +88,29 @@ class ModelsTestCase(CustomTestCase):
         temp_ioc.delete()
 
         self.assertEqual(Tag.objects.filter(ioc_id=temp_ioc.id).count(), 0)
+
+    def test_event_source_token_issue_and_check(self):
+        source = EventSource(owner=self.superuser, name="cowrie-source")
+        raw_token = source.issue_token()
+        source.save()
+
+        self.assertTrue(raw_token)
+        self.assertNotEqual(source.token_hash, raw_token)
+        self.assertTrue(source.check_token(raw_token))
+        self.assertFalse(source.check_token("invalid-token"))
+
+    def test_injected_event_model(self):
+        source = EventSource(owner=self.superuser, name="inject-source")
+        source.issue_token()
+        source.save()
+
+        event = InjectedEvent.objects.create(
+            source=source,
+            observable_value="8.8.8.8",
+            observable_type=IocType.IP.value,
+            payload_json={"observable": {"value": "8.8.8.8", "type": "ip"}},
+        )
+
+        self.assertEqual(event.status, InjectedEvent.Status.QUEUED)
+        self.assertEqual(event.observable_value, "8.8.8.8")
+        self.assertEqual(event.observable_type, IocType.IP.value)
